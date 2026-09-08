@@ -1,0 +1,20 @@
+# Sensitive environment variables (Database credentials, API keys)
+.env
+.env.*
+
+# Python virtual environments
+venv/
+.venv/
+env/
+
+# Python compiled bytecode & cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# macOS system metadata
+.DS_Store
+
+# IDE settings
+.vscode/
+.idea/
