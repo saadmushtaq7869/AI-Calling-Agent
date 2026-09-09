@@ -21,7 +21,7 @@ app.add_middleware(
 MONGODB_URL = os.getenv("MONGODB_URL")
 DATABASE_NAME = os.getenv("DATABASE_NAME", "vapi_database")
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+SMTP_PORT = int(os.getenv("SMTP_PORT", 465))
 SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASS = os.getenv("SMTP_PASS")
 SALES_TEAM_EMAIL = os.getenv("SALES_TEAM_EMAIL")
@@ -36,7 +36,7 @@ except Exception as e:
     print(f"MongoDB Connection Warning: {e}")
 
 def send_email_notification(subject: str, body_text: str, recipient_email: str):
-    """Safely sends email notifications via Gmail SMTP."""
+    """Safely sends email notifications via Gmail SMTP using SSL (Port 465)."""
     if not SMTP_USER or not SMTP_PASS:
         print("[SMTP Error] Missing SMTP_USER or SMTP_PASS environment variables.")
         return False
@@ -48,9 +48,14 @@ def send_email_notification(subject: str, body_text: str, recipient_email: str):
     msg.attach(MIMEText(body_text, "plain"))
 
     try:
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(SMTP_USER, SMTP_PASS.replace(" ", ""))  # Clean accidental spaces
+        # Use SMTP_SSL for Port 465 to bypass Render network blocks on Port 587
+        if str(SMTP_PORT) == "465":
+            server = smtplib.SMTP_SSL(SMTP_SERVER, 465, timeout=10)
+        else:
+            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10)
+            server.starttls()
+
+        server.login(SMTP_USER, SMTP_PASS.replace(" ", ""))  # Strip accidental spaces
         server.send_message(msg)
         server.quit()
         print(f"[SMTP Success] Email successfully sent to {recipient_email}")
@@ -69,7 +74,7 @@ async def vapi_webhook(request: Request):
     message = payload.get("message", {})
     message_type = message.get("type")
 
-    # Respond to Vapi tool-calls
+    # Respond to Vapi tool calls
     if message_type == "tool-calls":
         tool_calls = message.get("toolCalls", [])
         if not tool_calls:
@@ -88,7 +93,12 @@ async def vapi_webhook(request: Request):
             name = args.get("name", "Unknown")
             phone = args.get("phone", "Not provided")
             product = args.get("product", "Unspecified Product")
-            email = args.get("email", args.get("notes", "Not provided"))
+            email = args.get("email", "Not provided")
+            address = args.get("address", "Not provided")
+            notes = args.get("notes", "")
+
+            # Combine extra info if passed into notes
+            full_details = f"Address: {address} | Notes: {notes}"
 
             # 1. Save to MongoDB
             try:
@@ -97,6 +107,8 @@ async def vapi_webhook(request: Request):
                     "phone": phone,
                     "product": product,
                     "email": email,
+                    "address": address,
+                    "notes": notes,
                     "type": "purchase_lead"
                 })
                 print("[Database] Lead saved to MongoDB.")
@@ -104,22 +116,33 @@ async def vapi_webhook(request: Request):
                 print(f"[Database Error] Could not save to MongoDB: {mongo_err}")
 
             # 2. Email Sales Team
-            sales_email_body = f"New Purchase Lead Captured:\n\nName: {name}\nPhone: {phone}\nProduct: {product}\nEmail/Notes: {email}"
+            sales_email_body = (
+                f"New Purchase Lead Captured:\n\n"
+                f"Name: {name}\n"
+                f"Phone: {phone}\n"
+                f"Product: {product}\n"
+                f"Email: {email}\n"
+                f"Address: {address}\n"
+                f"Notes: {notes}"
+            )
             send_email_notification("New Purchase Lead Received", sales_email_body, SALES_TEAM_EMAIL)
 
             # 3. Email Buyer (if valid email provided)
             if "@" in str(email):
                 clean_email = email.strip()
-                buyer_email_body = f"Hi {name},\n\nThank you for your interest! We have received your order request for: {product}.\nOur team will reach out to you shortly at {phone}."
-                send_email_notification("Order Confirmation - " + product, buyer_email_body, clean_email)
+                buyer_email_body = (
+                    f"Hi {name},\n\n"
+                    f"Thank you for your order! We have received your request for: {product}.\n"
+                    f"Our team will contact you shortly at {phone}."
+                )
+                send_email_notification(f"Order Confirmation - {product}", buyer_email_body, clean_email)
 
-            # 4. Return success payload back to Vapi AI
+            # 4. Return success payload to Vapi AI
             return {
                 "results": [{
                     "toolCallId": tool_id,
-                    "result": f"Order for {product} recorded successfully. The customer will receive confirmation."
+                    "result": f"Order for {product} recorded successfully. Confirmation email sent."
                 }]
             }
 
-    # Default fallback for other Vapi event types (end-of-call-report, status-update, etc.)
     return {"status": "event processed"}
