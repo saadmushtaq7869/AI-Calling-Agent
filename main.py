@@ -48,14 +48,9 @@ def send_email_notification(subject: str, body_text: str, recipient_email: str):
     msg.attach(MIMEText(body_text, "plain"))
 
     try:
-        # Use SMTP_SSL for Port 465 to bypass Render network blocks on Port 587
-        if str(SMTP_PORT) == "465":
-            server = smtplib.SMTP_SSL(SMTP_SERVER, 465, timeout=10)
-        else:
-            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10)
-            server.starttls()
-
-        server.login(SMTP_USER, SMTP_PASS.replace(" ", ""))  # Strip accidental spaces
+        # Use SMTP_SSL specifically to bypass Render's Port 587 block
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10)
+        server.login(SMTP_USER, SMTP_PASS.replace(" ", ""))
         server.send_message(msg)
         server.quit()
         print(f"[SMTP Success] Email successfully sent to {recipient_email}")
