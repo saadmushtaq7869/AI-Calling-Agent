@@ -36,7 +36,7 @@ except Exception as e:
     print(f"MongoDB Connection Warning: {e}")
 
 def send_email_notification(subject: str, body_text: str, recipient_email: str):
-    """Safely sends email notifications via Gmail SMTP using SSL (Port 465)."""
+    """Sends email notifications using hardcoded SSL over Port 465 to bypass Render port blocks."""
     if not SMTP_USER or not SMTP_PASS:
         print("[SMTP Error] Missing SMTP_USER or SMTP_PASS environment variables.")
         return False
@@ -48,9 +48,10 @@ def send_email_notification(subject: str, body_text: str, recipient_email: str):
     msg.attach(MIMEText(body_text, "plain"))
 
     try:
-        # Use SMTP_SSL specifically to bypass Render's Port 587 block
-        server = smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10)
-        server.login(SMTP_USER, SMTP_PASS.replace(" ", ""))
+        # Force SMTP_SSL directly to smtp.gmail.com on port 465
+        clean_pass = SMTP_PASS.replace(" ", "").strip()
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15)
+        server.login(SMTP_USER.strip(), clean_pass)
         server.send_message(msg)
         server.quit()
         print(f"[SMTP Success] Email successfully sent to {recipient_email}")
@@ -58,7 +59,7 @@ def send_email_notification(subject: str, body_text: str, recipient_email: str):
     except Exception as e:
         print(f"[SMTP Failure] Failed to send email: {e}")
         return False
-
+    
 @app.get("/")
 def read_root():
     return {"status": "Vapi Backend API is running!"}
