@@ -1,14 +1,11 @@
 import os
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import resend
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo import MongoClient
 
 app = FastAPI()
 
-# Enable CORS for Netlify frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,11 +17,11 @@ app.add_middleware(
 # Environment Variables
 MONGODB_URL = os.getenv("MONGODB_URL")
 DATABASE_NAME = os.getenv("DATABASE_NAME", "vapi_database")
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 465))
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASS = os.getenv("SMTP_PASS")
 SALES_TEAM_EMAIL = os.getenv("SALES_TEAM_EMAIL")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+
+# Initialize Resend API Key
+resend.api_key = RESEND_API_KEY
 
 # Database Setup
 try:
@@ -36,30 +33,25 @@ except Exception as e:
     print(f"MongoDB Connection Warning: {e}")
 
 def send_email_notification(subject: str, body_text: str, recipient_email: str):
-    """Sends email notifications using hardcoded SSL over Port 465 to bypass Render port blocks."""
-    if not SMTP_USER or not SMTP_PASS:
-        print("[SMTP Error] Missing SMTP_USER or SMTP_PASS environment variables.")
+    """Sends emails via Resend HTTP API (Port 443) to bypass Render SMTP blocks."""
+    if not RESEND_API_KEY:
+        print("[Email Error] RESEND_API_KEY is not set in environment variables.")
         return False
-
-    msg = MIMEMultipart()
-    msg["From"] = SMTP_USER
-    msg["To"] = recipient_email
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body_text, "plain"))
 
     try:
-        # Force SMTP_SSL directly to smtp.gmail.com on port 465
-        clean_pass = SMTP_PASS.replace(" ", "").strip()
-        server = smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=15)
-        server.login(SMTP_USER.strip(), clean_pass)
-        server.send_message(msg)
-        server.quit()
-        print(f"[SMTP Success] Email successfully sent to {recipient_email}")
+        params = {
+            "from": "onboarding@resend.dev",  # Resend default testing domain
+            "to": [recipient_email],
+            "subject": subject,
+            "text": body_text,
+        }
+        response = resend.Emails.send(params)
+        print(f"[Email Success] Email sent successfully via HTTP API! ID: {response}")
         return True
     except Exception as e:
-        print(f"[SMTP Failure] Failed to send email: {e}")
+        print(f"[Email Failure] Failed to send email via Resend: {e}")
         return False
-    
+
 @app.get("/")
 def read_root():
     return {"status": "Vapi Backend API is running!"}
@@ -70,7 +62,6 @@ async def vapi_webhook(request: Request):
     message = payload.get("message", {})
     message_type = message.get("type")
 
-    # Respond to Vapi tool calls
     if message_type == "tool-calls":
         tool_calls = message.get("toolCalls", [])
         if not tool_calls:
@@ -84,7 +75,6 @@ async def vapi_webhook(request: Request):
 
         print(f"[Tool Triggered] Function: {function_name} | Args: {args}")
 
-        # Handle Lead Creation
         if function_name == "create_purchase_lead":
             name = args.get("name", "Unknown")
             phone = args.get("phone", "Not provided")
@@ -92,9 +82,6 @@ async def vapi_webhook(request: Request):
             email = args.get("email", "Not provided")
             address = args.get("address", "Not provided")
             notes = args.get("notes", "")
-
-            # Combine extra info if passed into notes
-            full_details = f"Address: {address} | Notes: {notes}"
 
             # 1. Save to MongoDB
             try:
@@ -114,16 +101,13 @@ async def vapi_webhook(request: Request):
             # 2. Email Sales Team
             sales_email_body = (
                 f"New Purchase Lead Captured:\n\n"
-                f"Name: {name}\n"
-                f"Phone: {phone}\n"
-                f"Product: {product}\n"
-                f"Email: {email}\n"
-                f"Address: {address}\n"
-                f"Notes: {notes}"
+                f"Name: {name}\nPhone: {phone}\nProduct: {product}\n"
+                f"Email: {email}\nAddress: {address}\nNotes: {notes}"
             )
-            send_email_notification("New Purchase Lead Received", sales_email_body, SALES_TEAM_EMAIL)
+            if SALES_TEAM_EMAIL:
+                send_email_notification("New Purchase Lead Received", sales_email_body, SALES_TEAM_EMAIL)
 
-            # 3. Email Buyer (if valid email provided)
+            # 3. Email Buyer
             if "@" in str(email):
                 clean_email = email.strip()
                 buyer_email_body = (
@@ -133,11 +117,11 @@ async def vapi_webhook(request: Request):
                 )
                 send_email_notification(f"Order Confirmation - {product}", buyer_email_body, clean_email)
 
-            # 4. Return success payload to Vapi AI
+            # 4. Immediate Return to Vapi
             return {
                 "results": [{
                     "toolCallId": tool_id,
-                    "result": f"Order for {product} recorded successfully. Confirmation email sent."
+                    "result": f"Order for {product} recorded successfully."
                 }]
             }
 
