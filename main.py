@@ -3,140 +3,123 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from fastapi import FastAPI, Request
-from dotenv import load_dotenv
-from motor.motor_asyncio import AsyncIOMotorClient
-from openai import OpenAI
+from fastapi.middleware.cors import CORSMiddleware
+from pymongo import MongoClient
 
-# 1. Load Environment Variables
-load_dotenv()
+app = FastAPI()
 
+# Enable CORS for Netlify frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Environment Variables
 MONGODB_URL = os.getenv("MONGODB_URL")
+DATABASE_NAME = os.getenv("DATABASE_NAME", "vapi_database")
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASS = os.getenv("SMTP_PASS")
 SALES_TEAM_EMAIL = os.getenv("SALES_TEAM_EMAIL")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# 2. Initialize Clients
-app = FastAPI(title="Vapi AI Backend Agent")
+# Database Setup
+try:
+    client = MongoClient(MONGODB_URL)
+    db = client[DATABASE_NAME]
+    leads_collection = db["leads"]
+    print("Connected to MongoDB successfully.")
+except Exception as e:
+    print(f"MongoDB Connection Warning: {e}")
 
-# MongoDB Connection
-db_client = AsyncIOMotorClient(MONGODB_URL)
-db = db_client.get_database("vapi_agent_db")
-leads_collection = db.get_collection("leads")
-issues_collection = db.get_collection("package_issues")
+def send_email_notification(subject: str, body_text: str, recipient_email: str):
+    """Safely sends email notifications via Gmail SMTP."""
+    if not SMTP_USER or not SMTP_PASS:
+        print("[SMTP Error] Missing SMTP_USER or SMTP_PASS environment variables.")
+        return False
 
-# OpenAI Client (Replaces heavy local sentence-transformers models)
-openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-
-
-# 3. Helper Functions
-def send_email(subject: str, body: str, recipient: str):
-    """Utility to send automated SMTP email alerts."""
-    if not SMTP_USER or not SMTP_PASS or not recipient:
-        print("[Warning] Missing SMTP credentials or recipient. Skipping email.")
-        return
+    msg = MIMEMultipart()
+    msg["From"] = SMTP_USER
+    msg["To"] = recipient_email
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body_text, "plain"))
 
     try:
-        msg = MIMEMultipart()
-        msg['From'] = SMTP_USER
-        msg['To'] = recipient
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain'))
-
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
         server.starttls()
-        server.login(SMTP_USER, SMTP_PASS)
+        server.login(SMTP_USER, SMTP_PASS.replace(" ", ""))  # Clean accidental spaces
         server.send_message(msg)
         server.quit()
-        print(f"[Email Success] Email sent to {recipient}")
+        print(f"[SMTP Success] Email successfully sent to {recipient_email}")
+        return True
     except Exception as e:
-        print(f"[Email Error] Failed to send email: {e}")
+        print(f"[SMTP Failure] Failed to send email: {e}")
+        return False
 
-
-def get_openai_embedding(text: str):
-    """Generates embeddings using OpenAI API instead of local sentence_transformers."""
-    if not openai_client:
-        return []
-    response = openai_client.embeddings.create(
-        input=text,
-        model="text-embedding-3-small"
-    )
-    return response.data[0].embedding
-
-
-# 4. FastAPI Health & Root Endpoints
 @app.get("/")
-async def root():
-    return {"status": "online", "message": "Vapi AI Agent Backend Operational"}
+def read_root():
+    return {"status": "Vapi Backend API is running!"}
 
-
-# 5. Core Webhook Handler for Vapi
 @app.post("/vapi/webhook")
-async def handle_vapi_webhook(request: Request):
+async def vapi_webhook(request: Request):
     payload = await request.json()
     message = payload.get("message", {})
     message_type = message.get("type")
 
-    # Handle Tool/Function Calls triggered by Vapi Voice Assistant
+    # Respond to Vapi tool-calls
     if message_type == "tool-calls":
-        tool_call_list = message.get("toolCalls", [])
-        results = []
+        tool_calls = message.get("toolCalls", [])
+        if not tool_calls:
+            return {"status": "no tool calls found"}
 
-        for tool_call in tool_call_list:
-            function_data = tool_call.get("function", {})
-            func_name = function_data.get("name")
-            args = function_data.get("arguments", {})
+        tool_call = tool_calls[0]
+        tool_id = tool_call.get("id")
+        function_data = tool_call.get("function", {})
+        function_name = function_data.get("name")
+        args = function_data.get("arguments", {})
 
-            # Tool 1: Purchase Lead Creation
-            if func_name == "create_purchase_lead":
-                lead_data = {
-                    "name": args.get("name"),
-                    "phone": args.get("phone"),
-                    "product": args.get("product"),
-                    "notes": args.get("notes", "")
-                }
-                # Save to MongoDB
-                await leads_collection.insert_one(lead_data)
-                
-                # Send Email Alert
-                email_body = f"New Lead Captured:\nName: {args.get('name')}\nPhone: {args.get('phone')}\nProduct: {args.get('product')}"
-                send_email("New Sales Lead Captured", email_body, SALES_TEAM_EMAIL)
+        print(f"[Tool Triggered] Function: {function_name} | Args: {args}")
 
-                results.append({
-                    "toolCallId": tool_call.get("id"),
-                    "result": "Success. Purchase lead saved and sales team notified."
+        # Handle Lead Creation
+        if function_name == "create_purchase_lead":
+            name = args.get("name", "Unknown")
+            phone = args.get("phone", "Not provided")
+            product = args.get("product", "Unspecified Product")
+            email = args.get("email", args.get("notes", "Not provided"))
+
+            # 1. Save to MongoDB
+            try:
+                leads_collection.insert_one({
+                    "name": name,
+                    "phone": phone,
+                    "product": product,
+                    "email": email,
+                    "type": "purchase_lead"
                 })
+                print("[Database] Lead saved to MongoDB.")
+            except Exception as mongo_err:
+                print(f"[Database Error] Could not save to MongoDB: {mongo_err}")
 
-            # Tool 2: Report Missing Package
-            elif func_name == "report_missing_package":
-                issue_data = {
-                    "order_id": args.get("order_id"),
-                    "customer_name": args.get("customer_name"),
-                    "details": args.get("details", "")
-                }
-                await issues_collection.insert_one(issue_data)
-                
-                email_body = f"Missing Package Reported:\nOrder ID: {args.get('order_id')}\nCustomer: {args.get('customer_name')}"
-                send_email("Urgent: Missing Package Report", email_body, SALES_TEAM_EMAIL)
+            # 2. Email Sales Team
+            sales_email_body = f"New Purchase Lead Captured:\n\nName: {name}\nPhone: {phone}\nProduct: {product}\nEmail/Notes: {email}"
+            send_email_notification("New Purchase Lead Received", sales_email_body, SALES_TEAM_EMAIL)
 
-                results.append({
-                    "toolCallId": tool_call.get("id"),
-                    "result": "Success. Package issue logged and escalated to support."
-                })
+            # 3. Email Buyer (if valid email provided)
+            if "@" in str(email):
+                clean_email = email.strip()
+                buyer_email_body = f"Hi {name},\n\nThank you for your interest! We have received your order request for: {product}.\nOur team will reach out to you shortly at {phone}."
+                send_email_notification("Order Confirmation - " + product, buyer_email_body, clean_email)
 
-            # Tool 3: Search RAG Knowledge Base
-            elif func_name == "search_rag_knowledge":
-                query = args.get("query", "")
-                # Generate lightweight vector embedding via OpenAI
-                query_vector = get_openai_embedding(query)
-                
-                results.append({
-                    "toolCallId": tool_call.get("id"),
-                    "result": f"Knowledge base searched for: '{query}'."
-                })
+            # 4. Return success payload back to Vapi AI
+            return {
+                "results": [{
+                    "toolCallId": tool_id,
+                    "result": f"Order for {product} recorded successfully. The customer will receive confirmation."
+                }]
+            }
 
-        return {"results": results}
-
-    return {"status": "event_received"}
+    # Default fallback for other Vapi event types (end-of-call-report, status-update, etc.)
+    return {"status": "event processed"}
